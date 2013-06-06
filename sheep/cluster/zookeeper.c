@@ -254,10 +254,14 @@ static bool zk_queue_peek(void)
 	snprintf(path, sizeof(path), QUEUE_ZNODE "/%010"PRId32, queue_pos);
 
 	rc = zk_node_exists(path);
-	if (rc == ZOK)
+	switch (rc) {
+	case ZOK:
 		return true;
-
-	return false;
+	case ZNONODE:
+		return false;
+	default:
+		panic("failed to check %s, %s", path, zerror(rc));
+	}
 }
 
 /* return true if there is a node with 'id' in the queue. */
@@ -504,8 +508,12 @@ static void zk_watcher(zhandle_t *zh, int type, int state, const char *path,
 	sd_dprintf("path:%s, type:%d", path, type);
 	if (type == ZOO_CREATED_EVENT || type == ZOO_CHANGED_EVENT) {
 		ret = sscanf(path, MEMBER_ZNODE "/%s", str);
-		if (ret == 1)
-			zk_node_exists(path);
+		if (ret == 1) {
+			int rc = zk_node_exists(path);
+			if (rc != ZOK)
+				panic("failed to check %s, %s", path,
+				      zerror(rc));
+		}
 		/* kick off the event handler */
 		eventfd_write(efd, 1);
 	} else if (type == ZOO_DELETED_EVENT) {
@@ -560,25 +568,52 @@ static int zk_join(const struct sd_node *myself,
 
 	snprintf(path, sizeof(path), MEMBER_ZNODE "/%s", node_to_str(myself));
 	rc = zk_node_exists(path);
-	if (rc == ZOK) {
+	switch (rc) {
+	case ZOK:
 		sd_eprintf("Previous zookeeper session exist, shoot myself.");
 		exit(1);
+	case ZNONODE:
+		/* success */
+		break;
+	default:
+		panic("failed to check %s, %s", path, zerror(rc));
+		break;
 	}
 
 	/* For concurrent nodes setup, we allow only one to continue */
-	while (zk_member_empty() && zk_master_create() != ZOK)
-		;/* wait */
-
+	while (zk_member_empty()) {
+		rc = zk_master_create();
+		switch (rc) {
+		case ZOK:
+			/* I'm a master */
+			goto out;
+		case ZNODEEXISTS:
+			/* wait */
+			break;
+		default:
+			panic("failed to create master %s", zerror(rc));
+		}
+	}
+out:
 	return add_join_event(opaque, opaque_len);
 }
 
 static int zk_leave(void)
 {
+	int rc;
 	char path[PATH_MAX];
 	snprintf(path, sizeof(path), MEMBER_ZNODE"/%s",
 			node_to_str(&this_node.node));
 	add_event(EVENT_LEAVE, &this_node, NULL, 0);
-	zk_delete_node(path, -1);
+	rc = zk_delete_node(path, -1);
+	switch (rc) {
+	case ZOK:
+	case ZNONODE:
+		/* success */
+		break;
+	default:
+		panic("failed to delete %s, %s", path, zerror(rc));
+	}
 	return 0;
 }
 
@@ -631,7 +666,9 @@ static void watch_all_nodes(void)
 		return;
 
 	FOR_EACH_ZNODE(MEMBER_ZNODE, path, &strs) {
-		zk_get_data(path, &znode, &len);
+		int rc = zk_get_data(path, &znode, &len);
+		if (rc != ZOK)
+			panic("failed to get data from %s", path);
 	}
 }
 
@@ -654,6 +691,7 @@ static void init_node_list(struct zk_event *ev)
 
 static void zk_handle_join_response(struct zk_event *ev)
 {
+	int rc;
 	char path[MAX_NODE_STR_LEN];
 
 	sd_dprintf("JOIN RESPONSE");
@@ -678,11 +716,34 @@ static void zk_handle_join_response(struct zk_event *ev)
 			 node_to_str(&ev->sender.node));
 		if (node_eq(&ev->sender.node, &this_node.node)) {
 			sd_dprintf("create path:%s", path);
-			zk_create_node(path, (char *)&ev->sender,
-				       sizeof(ev->sender), &ZOO_OPEN_ACL_UNSAFE,
-				       ZOO_EPHEMERAL, NULL, 0);
-		} else
-			zk_node_exists(path);
+			rc = zk_create_node(path, (char *)&ev->sender,
+					    sizeof(ev->sender),
+					    &ZOO_OPEN_ACL_UNSAFE,
+					    ZOO_EPHEMERAL, NULL, 0);
+			switch (rc) {
+			case ZOK:
+				/* success */
+				break;
+			case ZNODEEXISTS:
+				sd_eprintf("%s already exists", path);
+				break;
+			default:
+				panic("failed to create %s, %s", path,
+				      zerror(rc));
+				break;
+			}
+		} else {
+			rc = zk_node_exists(path);
+			switch (rc) {
+			case ZOK:
+			case ZNONODE:
+				/* success */
+				break;
+			default:
+				panic("failed to check %s, %s", path,
+				      zerror(rc));
+			}
+		}
 
 		zk_tree_add(&ev->sender);
 		break;
