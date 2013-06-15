@@ -729,7 +729,7 @@ notrace int __sd_dump_variable(const char *var, const void *base_sp)
 }
 
 #define dump_stack_frames() ({			\
-	register void *current_sp asm("rsp");	\
+	register void *current_sp asm("r13");	\
 	__dump_stack_frames(current_sp);	\
 })
 
